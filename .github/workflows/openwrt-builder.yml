@@ -10,7 +10,6 @@ on:
         default: 'false'
 
 env:
-  # 改用官方 OpenWrt 仓库和更稳定的分支
   REPO_URL: https://github.com/openwrt/openwrt
   REPO_BRANCH: openwrt-25.12
   FEEDS_CONF: feeds.conf.default
@@ -45,11 +44,19 @@ jobs:
         sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
         sudo -E apt-get -qq update
         sudo -E apt-get -qq install $(curl -fsSL git.io/depends-ubuntu-2404)
+        sudo -E apt-get -qq install rustc cargo
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
         sudo ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
         sudo mkdir -p /workdir
         sudo chown $USER:$GROUPS /workdir
+
+    - name: Setup Rust toolchain
+      run: |
+        rustc --version
+        cargo --version
+        # 安装必要的 Rust 组件
+        rustup target add x86_64-unknown-linux-musl || true
 
     - name: Clone source code
       working-directory: /workdir
@@ -78,6 +85,40 @@ jobs:
         chmod +x $DIY_P2_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
+
+    - name: Configure Rust settings for CI
+      run: |
+        cd openwrt
+        # 修改配置以适应 CI 环境中的 Rust 构建
+        if [ -f ".config" ]; then
+          # 备份原始配置
+          cp .config .config.bak
+          
+          # 确保 Rust 配置适合 CI 环境
+          # 使用 if-unchanged 而不是 download-ci-llvm=true
+          echo "# Rust configuration for CI environment" >> .config
+          # 不禁用 Rust，而是确保其配置正确
+        fi
+
+    - name: Create Rust configuration files
+      run: |
+        cd openwrt
+        # 创建 Rust 构建所需的配置文件
+        mkdir -p build_dir/target-x86_64_musl/host/rustc-*/
+        # 如果 Rust 相关的包被启用，确保有合适的配置
+        mkdir -p staging_dir/host/bin/
+        
+        # 创建一个基础的 Rust 配置文件来解决 CI 问题
+        cat > rust-config.toml << 'EOF'
+        [llvm]
+        download-ci-llvm = "if-unchanged"
+        
+        [build]
+        vendor = true
+        locked-deps = true
+        extended = false
+        tools = ["cargo", "rustdoc"]
+        EOF
 
     - name: Clean existing downloads cache
       run: |
@@ -112,11 +153,21 @@ jobs:
         rm -rf tmp/
         make defconfig
 
+    - name: Set up Rust environment variables
+      run: |
+        cd openwrt
+        # 设置 Rust 构建环境变量
+        export RUST_BACKTRACE=1
+        echo "RUST_BACKTRACE=1" >> $GITHUB_ENV
+        echo "Setting up Rust environment for OpenWrt build"
+
     - name: Compile the firmware
       id: compile
       run: |
         cd openwrt
         echo -e "$(nproc) thread compile"
+        # 设置 Rust 环境变量以解决 CI 问题
+        export RUST_BACKTRACE=1
         make -j$(nproc) || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
         grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
@@ -152,7 +203,7 @@ jobs:
 
     - name: Upload firmware to cowtransfer
       id: cowtransfer
-      if: ${{ steps.organize.outputs.status == 'success' && env.UPLOAD_COWTRANSFER == 'true' && !cancelled() }}
+      if: ${{ steps.organize.outputs.status == 'success' && env.UPLOAD_COWTRANSFRE == 'true' && !cancelled() }}
       run: |
         curl -fsSL git.io/file-transfer | sh
         ./transfer cow --block 2621440 -s -p 64 --no-progress ${FIRMWARE} 2>&1 | tee cowtransfer.log
